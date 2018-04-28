@@ -6,7 +6,10 @@
 
 #include "dev/leds.h"
 
+#include "dev/serial-line.h"
+
 #include <stdio.h>
+#include <string.h>
 
 #include "common.h"
 
@@ -28,16 +31,21 @@ MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
 static void
 broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
 {
-  // discard DIO messages
-  void * received = (void *)packetbuf_dataptr();
-  char type = ((char*)received)[0];
+  static void* received;
+  static char type; 
+  received = (void *)packetbuf_dataptr();
+  type = ((char*)received)[0];
   printf("Type received : %d\n", type);
   if(type == 0)
   {
     process_DIO((struct DIO*)received, from);
-    printf("Packet DIO discarded\n");
+  }
+  else if (type == 2)
+  {
+    process_DIS(from);
   }
 }
+
 static const struct broadcast_callbacks broadcast_call = {broadcast_recv};
 
 static void send_DIO()
@@ -49,6 +57,46 @@ static void send_DIO()
   broadcast_send(&broadcast);
   printf("DIO sent\n");
 }
+// Send a string message to a node (testing purpose)
+static void send_string_message(char* message, rimeaddr_t *dest)
+{
+
+  // search through routing table the next node to which send the message
+  static struct custom_route_entry *e;
+  static rimeaddr_t nextNode;
+
+  for(e = list_head(custom_route_table); e != NULL; e = e->next) 
+  {
+    // if entry found
+    if(rimeaddr_cmp(&e->dest, dest)) 
+    {
+      // get the next node
+      rimeaddr_copy(&nextNode, &e->nextNode);
+      break;
+    }
+  }
+  // If entry has been found
+  if (e != NULL)
+  {
+    packet_string.type = 3;
+    packet_string.dest = *dest;
+
+    strncpy(packet_string.message, message, 32);
+    packet_string.message[31] = '\0';
+
+    if(!runicast_is_transmitting(&runicast)) 
+    {
+      packetbuf_copyfrom((void*)&packet_string, sizeof(packet_string));
+      runicast_send(&runicast, &nextNode, MAX_RETRANSMISSIONS);
+      printf("Message sent via %d.%d!\n", nextNode.u8[0], nextNode.u8[1]);
+    }
+  }
+  else
+  {
+    printf("Can't find any route to destination ! \n");
+  }
+}
+
 static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
 {
   printf("DAO to %d.%d via %d.%d received\n",
@@ -88,9 +136,15 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
       e->nextNode.u8[1]);
   }
 }
+// Do nothing
 static void process_DIO(struct DIO * dio, const rimeaddr_t * from)
 {
   printf("Packet DIO discarded\n");
+}
+// Responfd by broadcasting a DIO 
+static void process_DIS(const rimeaddr_t * from)
+{
+  send_DIO();
 }
 /*---------------------------------------------------------------------------*/
 /*--------------------------UNICAST------------------------------------------*/
@@ -159,6 +213,8 @@ static const struct runicast_callbacks runicast_callbacks = {recv_runicast,
 PROCESS_THREAD(gateway_node_process, ev, data)
 {
   static struct etimer et;
+  static char* serial_received;
+  static rimeaddr_t dest;
 
   PROCESS_EXITHANDLER(runicast_close(&runicast);broadcast_close(&broadcast);)
 
@@ -173,10 +229,32 @@ PROCESS_THREAD(gateway_node_process, ev, data)
 
     /* Delay 2-4 seconds */
     etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
+    //etimer_set(&et, CLOCK_SECOND * 1);
+    //printf("test\n");
+    
+    //PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
 
-    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
+    // Get serial input
+    //
 
-    send_DIO();
+    PROCESS_WAIT_EVENT();
+
+    if(ev == serial_line_event_message && data != NULL) 
+    {
+       PROCESS_YIELD();
+       serial_received = (char *)data;
+       printf("received line: %s\n", serial_received);
+       dest.u8[0] = 3;
+       dest.u8[1] = 0;
+       send_string_message(serial_received, &dest);
+
+    }
+    if(etimer_expired(&et))
+    {
+      //send_DIO();
+    }
+
+    
   }
 
   PROCESS_END();

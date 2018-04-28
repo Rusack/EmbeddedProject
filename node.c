@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 
 #include "contiki.h"
 #include "net/rime.h"
@@ -15,6 +16,12 @@
 
 #include "common.h"
 
+// Sensors
+#include "dev/i2cmaster.h"  // Include IC driver
+#include "dev/tmp102.h"     // Include sensor driver
+#include "dev/battery-sensor.h"
+#include "dev/adxl345.h"
+
 
 /*---------------------------------------------------------------------------*/
 PROCESS(simple_node_process, "simple node");
@@ -29,6 +36,48 @@ static signed char parent_RSS = -100;
 static uint8_t parent_hops = 100; 
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
+/*---------------------------------------------------------------------------*/
+/*--------------------------SENSOR DATA--------------------------------------*/
+/*---------------------------------------------------------------------------*/
+static void get_temperature()
+{
+  static int16_t  tempint;
+  static uint16_t tempfrac;
+  static int16_t  raw;
+  static uint16_t absraw;
+  static int16_t  sign;
+  static char     minus = ' ';
+
+  sign = 1;
+  raw = tmp102_read_temp_raw();  // Reading from the sensor
+  absraw = raw;
+  if (raw < 0) 
+  { // Perform 2C's if sensor returned negative data
+    absraw = (raw ^ 0xFFFF) + 1;
+    sign = -1;
+  }
+  tempint  = (absraw >> 8) * sign;
+  tempfrac = ((absraw>>4) % 16) * 625; // Info in 1/10000 of degree
+  minus = ((tempint == 0) & (sign == -1)) ? '-'  : ' ' ;
+  printf ("Temp = %c%d.%04d\n", minus, tempint, tempfrac);
+}
+static void get_battery()
+{
+  static uint16_t bateria;
+  static float mv;
+  bateria = battery_sensor.value(0);
+  mv = (bateria * 2.500 * 2) / 4096;
+  printf("Battery: %i (%ld.%03d mV)\n", bateria, (long) mv,
+  (unsigned) ((mv - floor(mv)) * 1000));
+}
+static void get_accelerometer()
+{
+  static int16_t x, y, z;
+  x = accm_read_axis(X_AXIS);
+  y = accm_read_axis(Y_AXIS);
+  z = accm_read_axis(Z_AXIS);
+  printf("x: %d y: %d z: %d\n", x, y, z);
+}
 /*---------------------------------------------------------------------------*/
 /*--------------------------ROUTING---------------------------------------------*/
 /*---------------------------------------------------------------------------*/
@@ -55,9 +104,66 @@ static void send_DAO(rimeaddr_t *dest)
     printf("DAO sent!\n");
   }
 }
+// Ask for a DIO
+static void send_DIS()
+{
+  packet_DIS.type = 2;
+  packetbuf_copyfrom((void*)&packet_DIS, sizeof(packet_DIS));
+  broadcast_send(&broadcast);
+  printf("No parent, DIS sent\n");
+}
+// Send a string message to a node (testing purpose)
+static void send_string_message(char* message, rimeaddr_t *dest)
+{
+
+  // search through routing table the next node to which send the message
+  static struct custom_route_entry *e;
+  static rimeaddr_t nextNode;
+
+  for(e = list_head(custom_route_table); e != NULL; e = e->next) 
+  {
+    // if entry found
+    if(rimeaddr_cmp(&e->dest, dest)) 
+    {
+      // get the next node
+      rimeaddr_copy(&nextNode, &e->nextNode);
+      break;
+    }
+  }
+  // If entry has been found
+  if (e != NULL)
+  {
+    packet_string.type = 3;
+    packet_string.dest = *dest;
+
+    strncpy(packet_string.message, message, 32);
+    packet_string.message[31] = '\0';
+
+    if(!runicast_is_transmitting(&runicast)) 
+    {
+      packetbuf_copyfrom((void*)&packet_string, sizeof(packet_string));
+      runicast_send(&runicast, &nextNode, MAX_RETRANSMISSIONS);
+      printf("Message sent via %d.%d!\n", nextNode.u8[0], nextNode.u8[1]);
+    }
+  }
+  else
+  {
+    printf("Can't find any route to destination ! \n");
+  }
+}
 /*---------------------------------------------------------------------------*/
 /*--------------------------GENERAL PURPOSE----------------------------------*/
 /*---------------------------------------------------------------------------*/
+// math floor function
+float
+floor(float x)
+{
+  if(x >= 0.0f) {
+    return (float) ((int) x);
+  } else {
+    return (float) ((int) x - 1);
+  }
+}
 static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, uint8_t recv_Hops)
 {
     if(rimeaddr_cmp(addr, &parent))
@@ -107,7 +213,7 @@ static signed char get_last_rss()
   rss_val = cc2420_last_rssi;
   rss_offset=-45;
   rss=rss_val + rss_offset;
-  printf("RSSI of Last Packet Received is %d\n",rss);
+  //printf("RSSI of Last Packet Received is %d\n",rss);
 
   return rss;
 }
@@ -127,6 +233,10 @@ broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
   {
     process_DIO((struct DIO*)received, from);
   }
+  else if (type == 2)
+  {
+    process_DIS(from);
+  }
 }
 
 // Variables
@@ -144,13 +254,15 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
   // update route table
   e = NULL;
   // check if already present, if so update it
-  for(e = list_head(custom_route_table); e != NULL; e = e->next) {
+  for(e = list_head(custom_route_table); e != NULL; e = e->next) 
+  {
     printf("Route entry : %d.%d via %d.%d\n", 
       e->dest.u8[0],
       e->dest.u8[1],
       e->nextNode.u8[0],
       e->nextNode.u8[1]);
-    if(rimeaddr_cmp(&e->dest, &dao->dest)) {
+    if(rimeaddr_cmp(&e->dest, &dao->dest)) 
+    {
       rimeaddr_copy(&e->nextNode, nextNode);
       printf("Update entry of routing table\n");
       break;
@@ -165,7 +277,15 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
     list_push(custom_route_table, e);
     printf("Add new entry to routing table\n");
   }
+
+  // forward the DAO to the parent as well (if there's a parent)
+  if(!rimeaddr_cmp(&rimeaddr_null, &parent))
+  {    
+    const rimeaddr_t dest = dao->dest;
+    send_DAO(&dest);
+  }
 }
+// Check for a new parent using the received DIO
 static void process_DIO(struct DIO * dio, const rimeaddr_t *from)
 {
   // Hops variable
@@ -186,6 +306,27 @@ static void process_DIO(struct DIO * dio, const rimeaddr_t *from)
 
   check_parent_change(from, rss, hops);
 
+}
+// Responfd by broadcasting a DIO 
+static void process_DIS(const rimeaddr_t * from)
+{
+  // If it's part of a network send a DIO otherwise ignore
+  if (!rimeaddr_cmp(&parent, &rimeaddr_null))
+  {
+    send_DIO();
+  }
+}
+// Process string message, get content or forward it
+process_string_message(struct string_message * string_message)
+{
+  if(rimeaddr_cmp(&rimeaddr_node_addr, &string_message->dest))
+  {
+    printf("It's for me ! Message is %s\n", string_message->message);
+  }
+  else
+  {
+    send_string_message(string_message->message, &string_message->dest);
+  }
 }
 /*---------------------------------------------------------------------------*/
 /*--------------------------UNICAST------------------------------------------*/
@@ -231,18 +372,10 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
   if(type == 1)
   {
     process_DAO((struct DAO*)received, from);
-    // forward the DAO to the parent as well
-    if(!rimeaddr_cmp(&rimeaddr_null, &parent))
-    {
-      printf("Forward DAO from %d.%d to %d.%d\n",
-        from->u8[0],
-        from->u8[1],
-        parent.u8[0],
-        parent.u8[1]);
-      
-      const rimeaddr_t dest = ((struct DAO*)received)->dest;
-      send_DAO(&dest);
-    }
+  }
+  else if (type == 3)
+  {
+    process_string_message((struct string_message*)received);
   }
   /*
   printf("runicast message received from %d.%d : \"%s\" , seqno %d\n",
@@ -266,6 +399,7 @@ timedout_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retrans
   if(rimeaddr_cmp(to, &parent))
   {
     rimeaddr_copy(&parent, &rimeaddr_null);
+    rank = 255;
   }
 }
 static const struct runicast_callbacks runicast_callbacks = {recv_runicast,
@@ -291,6 +425,16 @@ PROCESS_THREAD(simple_node_process, ev, data)
   list_init(history_table);
   memb_init(&history_mem);
 
+  // Route table
+  list_init(custom_route_table);
+  memb_init(&custom_route_mem);
+
+  // initialize temperature sensor 
+  tmp102_init();
+  // battery sensor 
+  SENSORS_ACTIVATE(battery_sensor);
+  // Accelerometer
+  accm_init();
 
   while(1) {
     static struct etimer et;
@@ -304,9 +448,18 @@ PROCESS_THREAD(simple_node_process, ev, data)
     // If in graph
     if(!rimeaddr_cmp(&parent, &rimeaddr_null))
     {
+      //send_DIO();
+      // Advertise parent of route
       send_DAO(&rimeaddr_node_addr);
-      send_DIO();
     }
+    else
+    {
+      // probe for a graph
+      send_DIS();
+    }
+    get_temperature();
+    get_battery();
+    get_accelerometer();
   }
 
   PROCESS_END();
