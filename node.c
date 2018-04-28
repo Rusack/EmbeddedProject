@@ -22,6 +22,7 @@
 #include "dev/battery-sensor.h"
 #include "dev/adxl345.h"
 
+#define MAX_RETRANSMISSIONS 5
 
 /*---------------------------------------------------------------------------*/
 PROCESS(simple_node_process, "simple node");
@@ -205,6 +206,7 @@ static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, u
             parent.u8[0],
             parent.u8[1]);
     rank = recv_Hops + 1;
+    send_DAO(&rimeaddr_node_addr);
 }
 static signed char get_last_rss()
 {
@@ -463,7 +465,6 @@ PROCESS_THREAD(simple_node_process, ev, data)
       {
         // Advertise parent of route
         send_DAO(&rimeaddr_node_addr);
-        send_DIO();
       }
       //get_temperature();
       //get_battery();
@@ -476,6 +477,7 @@ PROCESS_THREAD(simple_node_process, ev, data)
     }
     if(etimer_expired(&status_et))
     {
+      send_DIO();
         printf("I'm %d.%d and my parent is %d.%d\n",
        rimeaddr_node_addr.u8[0],
        rimeaddr_node_addr.u8[1],

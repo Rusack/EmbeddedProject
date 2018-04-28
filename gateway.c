@@ -13,7 +13,7 @@
 
 #include "common.h"
 
-
+#define MAX_RETRANSMISSIONS 10
 
 /*---------------------------------------------------------------------------*/
 PROCESS(gateway_node_process, "gateway node");

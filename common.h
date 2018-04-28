@@ -1,7 +1,6 @@
 #ifndef COMMON
 #define COMMON
 
-#define MAX_RETRANSMISSIONS 5
 #define NUM_HISTORY_ENTRIES 4
 #define MAX_ROUTE_ENTRIES 15
 
