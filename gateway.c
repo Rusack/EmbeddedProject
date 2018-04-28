@@ -244,14 +244,16 @@ PROCESS_THREAD(gateway_node_process, ev, data)
        PROCESS_YIELD();
        serial_received = (char *)data;
        printf("received line: %s\n", serial_received);
-       dest.u8[0] = 3;
-       dest.u8[1] = 0;
+       dest.u8[0] = serial_received[0] - '0';
+       dest.u8[1] = serial_received[1] - '0';
+       printf("Sending message to %d.%d\n",dest.u8[0], dest.u8[1] );
+       serial_received = serial_received + 2;
        send_string_message(serial_received, &dest);
 
     }
     if(etimer_expired(&et))
     {
-      //send_DIO();
+      send_DIO();
     }
 
     

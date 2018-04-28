@@ -39,6 +39,16 @@ MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
 /*---------------------------------------------------------------------------*/
 /*--------------------------SENSOR DATA--------------------------------------*/
 /*---------------------------------------------------------------------------*/
+// math floor function
+float
+floor(float x)
+{
+  if(x >= 0.0f) {
+    return (float) ((int) x);
+  } else {
+    return (float) ((int) x - 1);
+  }
+}
 static void get_temperature()
 {
   static int16_t  tempint;
@@ -154,16 +164,6 @@ static void send_string_message(char* message, rimeaddr_t *dest)
 /*---------------------------------------------------------------------------*/
 /*--------------------------GENERAL PURPOSE----------------------------------*/
 /*---------------------------------------------------------------------------*/
-// math floor function
-float
-floor(float x)
-{
-  if(x >= 0.0f) {
-    return (float) ((int) x);
-  } else {
-    return (float) ((int) x - 1);
-  }
-}
 static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, uint8_t recv_Hops)
 {
     if(rimeaddr_cmp(addr, &parent))
@@ -174,7 +174,7 @@ static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, u
       return;
     }
     // If the gateway is found
-    if(recv_Hops == 0)
+    if(recv_Hops == 0 && recv_RSS > parent_RSS)
     {
       printf("Gateway found, has address %d.%d\n", 
             addr->u8[0],
@@ -187,9 +187,13 @@ static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, u
       printf("Use first node encountered as parent \n");
     }
     // Check if node has better signal than current parent
-    else if(recv_RSS > parent_RSS)
+    else if(recv_Hops <= parent_hops && recv_RSS > parent_RSS)
     { 
       printf("Found closer node \n");
+    }
+    else if (recv_Hops < parent_hops)
+    {
+      printf("Found upper node \n");
     }
     else
       {return ;}
@@ -228,7 +232,7 @@ broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
   static char type; 
   received = packetbuf_dataptr();
   type = ((char*)received)[0];
-  printf("Type received : %d\n", type);
+  //printf("Type received : %d\n", type);
   if(type == 0)
   {
     process_DIO((struct DIO*)received, from);
@@ -256,11 +260,6 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
   // check if already present, if so update it
   for(e = list_head(custom_route_table); e != NULL; e = e->next) 
   {
-    printf("Route entry : %d.%d via %d.%d\n", 
-      e->dest.u8[0],
-      e->dest.u8[1],
-      e->nextNode.u8[0],
-      e->nextNode.u8[1]);
     if(rimeaddr_cmp(&e->dest, &dao->dest)) 
     {
       rimeaddr_copy(&e->nextNode, nextNode);
@@ -276,6 +275,15 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
     rimeaddr_copy(&e->dest, &dao->dest);
     list_push(custom_route_table, e);
     printf("Add new entry to routing table\n");
+  }
+  // list all route entry
+  for(e = list_head(custom_route_table); e != NULL; e = e->next) 
+  {
+    printf("Route entry : %d.%d via %d.%d\n", 
+      e->dest.u8[0],
+      e->dest.u8[1],
+      e->nextNode.u8[0],
+      e->nextNode.u8[1]);
   }
 
   // forward the DAO to the parent as well (if there's a parent)
@@ -368,7 +376,7 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
 
   void* received = packetbuf_dataptr();
   type = ((char*)received)[0];
-  printf("Type received : %d\n", type);
+  //printf("Type received : %d\n", type);
   if(type == 1)
   {
     process_DAO((struct DAO*)received, from);
@@ -436,30 +444,45 @@ PROCESS_THREAD(simple_node_process, ev, data)
   // Accelerometer
   accm_init();
 
-  while(1) {
-    static struct etimer et;
+  while(1) 
+  {
+    static struct etimer DIS_et;
+    static struct etimer DAO_et;
+    static struct etimer status_et;
 
-    printf("I'm %d.%d and my parent is %d.%d\n",
-     rimeaddr_node_addr.u8[0],
-     rimeaddr_node_addr.u8[1],
-     parent.u8[0],parent.u8[1]);
-    etimer_set(&et, CLOCK_SECOND * 4 + random_rand() % (CLOCK_SECOND * 4));
-    PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et));
-    // If in graph
-    if(!rimeaddr_cmp(&parent, &rimeaddr_null))
+    etimer_set(&DIS_et, CLOCK_SECOND * 2 + random_rand() % (CLOCK_SECOND * 2));
+    etimer_set(&DAO_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3));
+    etimer_set(&status_et, CLOCK_SECOND * 5 );
+
+    PROCESS_WAIT_EVENT();
+
+    if(etimer_expired(&DAO_et)) 
     {
-      //send_DIO();
-      // Advertise parent of route
-      send_DAO(&rimeaddr_node_addr);
+      // If in graph
+      if(!rimeaddr_cmp(&parent, &rimeaddr_null))
+      {
+        // Advertise parent of route
+        send_DAO(&rimeaddr_node_addr);
+        send_DIO();
+      }
+      //get_temperature();
+      //get_battery();
+      //get_accelerometer();
     }
-    else
+    if(etimer_expired(&DIS_et) && rimeaddr_cmp(&parent, &rimeaddr_null))
     {
-      // probe for a graph
-      send_DIS();
+        // probe for a graph
+        send_DIS();
     }
-    get_temperature();
-    get_battery();
-    get_accelerometer();
+    if(etimer_expired(&status_et))
+    {
+        printf("I'm %d.%d and my parent is %d.%d\n",
+       rimeaddr_node_addr.u8[0],
+       rimeaddr_node_addr.u8[1],
+       parent.u8[0],parent.u8[1]);
+    }
+    
+
   }
 
   PROCESS_END();
