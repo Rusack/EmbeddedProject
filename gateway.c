@@ -13,7 +13,7 @@
 
 #include "common.h"
 
-#define MAX_RETRANSMISSIONS 10
+#define MAX_RETRANSMISSIONS 15
 
 /*---------------------------------------------------------------------------*/
 PROCESS(gateway_node_process, "gateway node");
@@ -216,11 +216,12 @@ PROCESS_THREAD(gateway_node_process, ev, data)
   static char* serial_received;
   static rimeaddr_t dest;
 
-  PROCESS_EXITHANDLER(runicast_close(&runicast);broadcast_close(&broadcast);)
+  PROCESS_EXITHANDLER(goto exit)
 
   PROCESS_BEGIN();
 
-  parent = rimeaddr_null;
+  rimeaddr_copy(&parent, &rimeaddr_null);
+
 
   runicast_open(&runicast, 144, &runicast_callbacks);
   broadcast_open(&broadcast, 129, &broadcast_call);
@@ -255,9 +256,11 @@ PROCESS_THREAD(gateway_node_process, ev, data)
     {
       send_DIO();
     }
-
-    
   }
+
+  exit :
+    runicast_close(&runicast);
+    broadcast_close(&broadcast);
 
   PROCESS_END();
 }

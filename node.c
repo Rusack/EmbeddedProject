@@ -22,7 +22,9 @@
 #include "dev/battery-sensor.h"
 #include "dev/adxl345.h"
 
-#define MAX_RETRANSMISSIONS 5
+#include "leds.h"
+
+#define MAX_RETRANSMISSIONS 10
 
 /*---------------------------------------------------------------------------*/
 PROCESS(simple_node_process, "simple node");
@@ -332,6 +334,7 @@ process_string_message(struct string_message * string_message)
   if(rimeaddr_cmp(&rimeaddr_node_addr, &string_message->dest))
   {
     printf("It's for me ! Message is %s\n", string_message->message);
+    leds_toggle(LEDS_ALL);
   }
   else
   {
@@ -421,7 +424,7 @@ static const struct runicast_callbacks runicast_callbacks = {recv_runicast,
 PROCESS_THREAD(simple_node_process, ev, data)
 {
   // Close the connections at the end of the thread
-  PROCESS_EXITHANDLER(runicast_close(&runicast);broadcast_close(&broadcast);)
+  PROCESS_EXITHANDLER(goto exit)
 
   PROCESS_BEGIN();
 
@@ -438,6 +441,9 @@ PROCESS_THREAD(simple_node_process, ev, data)
   // Route table
   list_init(custom_route_table);
   memb_init(&custom_route_mem);
+
+  // Activate leds for real test
+  leds_off(LEDS_ALL);
 
   // initialize temperature sensor 
   tmp102_init();
@@ -483,10 +489,16 @@ PROCESS_THREAD(simple_node_process, ev, data)
        rimeaddr_node_addr.u8[1],
        parent.u8[0],parent.u8[1]);
     }
-    
+      
 
   }
 
-  PROCESS_END();
+  exit :
+    leds_off(LEDS_ALL);
+    runicast_close(&runicast);
+    broadcast_close(&broadcast);
+    PROCESS_END();
+
+
 }
 /*---------------------------------------------------------------------------*/
