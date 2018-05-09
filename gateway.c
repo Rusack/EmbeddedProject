@@ -23,6 +23,8 @@ AUTOSTART_PROCESSES(&gateway_node_process);
 /*---------------------------------------------------------------------------*/
 static uint8_t rank = 0;
 static rimeaddr_t parent;
+static uint8_t sensor_types = 0;
+
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
 /*---------------------------------------------------------------------------*/

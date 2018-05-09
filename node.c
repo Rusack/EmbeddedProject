@@ -25,6 +25,7 @@
 #include "leds.h"
 
 #define MAX_RETRANSMISSIONS 10
+#define SIGNAL
 
 /*---------------------------------------------------------------------------*/
 PROCESS(simple_node_process, "simple node");
@@ -37,6 +38,12 @@ static rimeaddr_t parent;
 static signed char parent_RSS = -100;
 // hops is parent rank
 static uint8_t parent_hops = 100; 
+// Indicates if the node can still reach the root node
+static uint8_t root_reachable = 0;
+// Used to remember which data to send
+static uint8_t sensor_types = 0;
+
+
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
 /*---------------------------------------------------------------------------*/
@@ -104,12 +111,39 @@ static void send_DIO()
   broadcast_send(&broadcast);
   printf("DIO sent\n");
 }
+
+static void send_DIO_unicast(rimeaddr_t *to)
+{
+  packet_DIO.type = 0;
+  packet_DIO.rank = rank;
+  packet_DIO.parent = parent;
+  packetbuf_copyfrom((void*)&packet_DIO, sizeof(packet_DIO));
+  if(!runicast_is_transmitting(&runicast)) 
+  {
+    runicast_send(&runicast, to, MAX_RETRANSMISSIONS);
+  }
+}
 // Indicate that a destination is reachable through this node (used her to advertise the route to the parents)
 // Sent upward to the gateway
-static void send_DAO(rimeaddr_t *dest)
+static void send_DAO(rimeaddr_t *dest, struct DAO* to_forward)
 {
   packet_DAO.type = 1;
-  packet_DAO.dest = *dest;
+  rimeaddr_copy(&packet_DAO.dest, dest);
+
+  if (to_forward == NULL)
+  {
+    rimeaddr_copy(&packet_DAO.path[0], &rimeaddr_node_addr);
+    packet_DAO.hops = 0;
+    // Fill array with 0
+    memset(&packet_DAO.path, 0, 4*sizeof(rimeaddr_t));
+  }
+  else
+  {
+    memcpy(&packet_DAO.path, &to_forward->path, 4*sizeof(rimeaddr_t));
+    rimeaddr_copy(&packet_DAO.path[to_forward->hops % 4], &rimeaddr_node_addr);
+    packet_DAO.hops = to_forward->hops + 1;
+  }
+  
   if(!runicast_is_transmitting(&runicast)) 
   {
     packetbuf_copyfrom((void*)&packet_DAO, sizeof(packet_DAO));
@@ -176,39 +210,37 @@ static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, u
       parent_hops = recv_Hops;
       return;
     }
-    // If the gateway is found
-    if(recv_Hops == 0 && recv_RSS > parent_RSS)
-    {
-      printf("Gateway found, has address %d.%d\n", 
-            addr->u8[0],
-            addr->u8[1]);
-      rank = recv_Hops + 1;
-    }
+
     // Check if there is already a parent
-    else if(rimeaddr_cmp(&parent, &rimeaddr_null))
+    if(rimeaddr_cmp(&parent, &rimeaddr_null))
     {
       printf("Use first node encountered as parent \n");
     }
+    #ifdef SIGNAL
     // Check if node has better signal than current parent
-    else if(recv_Hops <= parent_hops && recv_RSS > parent_RSS)
+    else if(recv_RSS > parent_RSS)
     { 
       printf("Found closer node \n");
     }
-    else if (recv_Hops < parent_hops)
+    #else
+    else if(recv_Hops  < parent_hops)
     {
-      printf("Found upper node \n");
+      printf("Found node with less hops \n");
     }
+    #endif
     else
       {return ;}
 
     rimeaddr_copy(&parent, addr);
     parent_RSS = recv_RSS;
-    parent_hops = recv_Hops;
+    root_reachable = 1;
     printf("Change parent to %d.%d\n", 
             parent.u8[0],
             parent.u8[1]);
+    // Hops way
+    parent_hops = recv_Hops;
     rank = recv_Hops + 1;
-    send_DAO(&rimeaddr_node_addr);
+    send_DAO(&rimeaddr_node_addr, NULL);
 }
 static signed char get_last_rss()
 {
@@ -253,12 +285,33 @@ static const struct broadcast_callbacks broadcast_call = {broadcast_recv};
 static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
 {
   static struct custom_route_entry *e;
+  static uint8_t i;
 
   printf("DAO to %d.%d via %d.%d received\n",
     dao->dest.u8[0],
     dao->dest.u8[1],
     nextNode->u8[0],
     nextNode->u8[1]);
+
+  // Check if parent is sending a DAO
+  if (rimeaddr_cmp(nextNode, &parent))
+  { 
+    send_DIS();
+    forget_parent();
+    return;
+  }
+
+  // Check for loop, if this node has already received this DAO
+  for ( i = 0; i < 4; ++i)
+  {
+    if (rimeaddr_cmp(&dao->path[i], &rimeaddr_node_addr))
+    {
+      send_DIS();
+      forget_parent();
+      return;
+    }
+  }
+
   // update route table
   e = NULL;
   // check if already present, if so update it
@@ -293,10 +346,18 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
   // forward the DAO to the parent as well (if there's a parent)
   if(!rimeaddr_cmp(&rimeaddr_null, &parent))
   {    
-    const rimeaddr_t dest = dao->dest;
-    send_DAO(&dest);
+    static rimeaddr_t dest;
+    dest = dao->dest;
+    send_DAO(&dest, dao);
   }
 }
+static void forget_parent()
+{
+  root_reachable = 0;
+  rimeaddr_copy(&parent, &rimeaddr_null);
+  rank = 255;
+}
+
 // Check for a new parent using the received DIO
 static void process_DIO(struct DIO * dio, const rimeaddr_t *from)
 {
@@ -322,10 +383,15 @@ static void process_DIO(struct DIO * dio, const rimeaddr_t *from)
 // Responfd by broadcasting a DIO 
 static void process_DIS(const rimeaddr_t * from)
 {
-  // If it's part of a network send a DIO otherwise ignore
-  if (!rimeaddr_cmp(&parent, &rimeaddr_null))
+  if(rimeaddr_cmp(&parent, from))
   {
-    send_DIO();
+    printf("My parent is dead \n");
+    forget_parent();
+  }
+  // If it's part of a network send a DIO otherwise ignore
+  else if (!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable)
+  {
+    send_DIO_unicast(from);
   }
 }
 // Process string message, get content or forward it
@@ -411,8 +477,7 @@ timedout_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retrans
   // timed out is used to check if parent is still at reach 
   if(rimeaddr_cmp(to, &parent))
   {
-    rimeaddr_copy(&parent, &rimeaddr_null);
-    rank = 255;
+    forget_parent(); 
   }
 }
 static const struct runicast_callbacks runicast_callbacks = {recv_runicast,
@@ -458,39 +523,47 @@ PROCESS_THREAD(simple_node_process, ev, data)
     static struct etimer DAO_et;
     static struct etimer status_et;
 
-    etimer_set(&DIS_et, CLOCK_SECOND * 2 + random_rand() % (CLOCK_SECOND * 2));
-    etimer_set(&DAO_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3));
-    etimer_set(&status_et, CLOCK_SECOND * 5 );
+    etimer_set(&DIS_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3));
+    etimer_set(&DAO_et, CLOCK_SECOND * 5 + random_rand() % (CLOCK_SECOND * 5));
+    etimer_set(&status_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3) );
 
     PROCESS_WAIT_EVENT();
 
     if(etimer_expired(&DAO_et)) 
     {
       // If in graph
-      if(!rimeaddr_cmp(&parent, &rimeaddr_null))
+      if(!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable)
       {
         // Advertise parent of route
-        send_DAO(&rimeaddr_node_addr);
+        send_DAO(&rimeaddr_node_addr, NULL);
       }
-      //get_temperature();
       //get_battery();
       //get_accelerometer();
+      etimer_reset(&DAO_et);
+      printf("Apres reset");
     }
     if(etimer_expired(&DIS_et) && rimeaddr_cmp(&parent, &rimeaddr_null))
     {
         // probe for a graph
         send_DIS();
+        etimer_reset(&DIS_et);
     }
     if(etimer_expired(&status_et))
     {
-      send_DIO();
-        printf("I'm %d.%d and my parent is %d.%d\n",
-       rimeaddr_node_addr.u8[0],
-       rimeaddr_node_addr.u8[1],
-       parent.u8[0],parent.u8[1]);
-    }
-      
+      printf("Timer status\n");
+      if(!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable) 
+      {
+        send_DIO();
+      }
+      //get_temperature();
 
+      printf("I'm %d.%d and my parent is %d.%d\n",
+      rimeaddr_node_addr.u8[0],
+      rimeaddr_node_addr.u8[1],
+      parent.u8[0],parent.u8[1]);
+      etimer_reset(&status_et);
+    }
+    
   }
 
   exit :
