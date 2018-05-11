@@ -24,6 +24,8 @@ AUTOSTART_PROCESSES(&gateway_node_process);
 static uint8_t rank = 0;
 static rimeaddr_t parent;
 static uint8_t sensor_types = 0;
+static uint8_t periodicity = 0;
+static uint8_t config_version = 0;
 
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
@@ -99,6 +101,26 @@ static void send_string_message(char* message, rimeaddr_t *dest)
   }
 }
 
+static void send_config(uint8_t key, uint8_t value)
+{
+  if(key == 0)
+  {
+    packet_config.type = 5;
+    periodicity = value;
+  }
+  else if (key == 1)
+  {
+    packet_config.type = 6;
+    sensor_types = value;
+  }
+  printf("Sending config change of %d to %d \n", key, value);
+  packet_config.value = value;
+  ++config_version;
+  packet_config.version = config_version;
+  packetbuf_copyfrom((void*)&packet_config, sizeof(packet_config));
+  broadcast_send(&broadcast);
+}
+
 static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
 {
   printf("DAO to %d.%d via %d.%d received\n",
@@ -148,6 +170,37 @@ static void process_DIS(const rimeaddr_t * from)
 {
   send_DIO();
 }
+static void process_sensor_data(struct sensor_data* data)
+{
+  static char format[23];
+  static uint8_t written;
+  written = 6;
+
+  memset(format, '0', sizeof(format));
+
+  strcpy(format, "%d.%d!");
+  if (sensor_types & 0b001)
+  {
+    strcpy(&format[written], "%d!");
+    written += 3;
+  }
+  if (sensor_types & 0b010)
+  {
+    strcpy(&format[written], "%d!");
+    written += 3;
+  }
+  if (sensor_types & 0b100)
+  {
+    strcpy(&format[written], "%d:%d:%d!");
+    written += 9;
+  }
+  strcpy(&format[written], "\n\0");
+  printf("%s", format);
+  printf(format,
+   data->orig.u8[0], data->orig.u8[1], data->data[0],
+    data->data[1], data->data[2], data->data[3], data->data[4]);
+}
+
 /*---------------------------------------------------------------------------*/
 /*--------------------------UNICAST------------------------------------------*/
 /*---------------------------------------------------------------------------*/
@@ -190,6 +243,10 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
   if(type == 1)
   {
     process_DAO((struct DAO*)received, from);
+  }
+  else if (type == 4)
+  {
+    process_sensor_data((struct sensor_data*)received);
   }
   /*
   printf("runicast message received from %d.%d : \"%s\" , seqno %d\n",
@@ -244,15 +301,14 @@ PROCESS_THREAD(gateway_node_process, ev, data)
 
     if(ev == serial_line_event_message && data != NULL) 
     {
-       PROCESS_YIELD();
        serial_received = (char *)data;
        printf("received line: %s\n", serial_received);
-       dest.u8[0] = serial_received[0] - '0';
-       dest.u8[1] = serial_received[1] - '0';
-       printf("Sending message to %d.%d\n",dest.u8[0], dest.u8[1] );
-       serial_received = serial_received + 2;
-       send_string_message(serial_received, &dest);
-
+       //dest.u8[0] = serial_received[0] - '0';
+       //dest.u8[1] = serial_received[1] - '0';
+       //printf("Sending message to %d.%d\n",dest.u8[0], dest.u8[1] );
+       //serial_received = serial_received + 2;
+       //send_string_message(serial_received, &dest);
+       send_config(serial_received[0] - '0', serial_received[1] - '0');
     }
     if(etimer_expired(&et))
     {

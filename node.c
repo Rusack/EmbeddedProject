@@ -42,7 +42,12 @@ static uint8_t parent_hops = 100;
 static uint8_t root_reachable = 0;
 // Used to remember which data to send
 static uint8_t sensor_types = 0;
+static uint8_t periodicity = 0;
+static uint8_t config_version = 0;
 
+static int16_t last_temperature;
+static int16_t last_battery;
+static int16_t[3] last_accelerometer;
 
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
@@ -59,7 +64,7 @@ floor(float x)
     return (float) ((int) x - 1);
   }
 }
-static void get_temperature()
+static int16_t get_temperature()
 {
   static int16_t  tempint;
   static uint16_t tempfrac;
@@ -79,24 +84,25 @@ static void get_temperature()
   tempint  = (absraw >> 8) * sign;
   tempfrac = ((absraw>>4) % 16) * 625; // Info in 1/10000 of degree
   minus = ((tempint == 0) & (sign == -1)) ? '-'  : ' ' ;
-  printf ("Temp = %c%d.%04d\n", minus, tempint, tempfrac);
+  //printf ("Temp = %c%d.%04d\n", minus, tempint, tempfrac);
+  return raw;
 }
-static void get_battery()
+static uint16_t get_battery()
 {
   static uint16_t bateria;
   static float mv;
   bateria = battery_sensor.value(0);
   mv = (bateria * 2.500 * 2) / 4096;
-  printf("Battery: %i (%ld.%03d mV)\n", bateria, (long) mv,
-  (unsigned) ((mv - floor(mv)) * 1000));
+  //printf("Battery: %i (%ld.%03d mV)\n", bateria, (long) mv,
+  //(unsigned) ((mv - floor(mv)) * 1000));
+  return bateria;
 }
-static void get_accelerometer()
+static void get_accelerometer(int16_t* data)
 {
-  static int16_t x, y, z;
-  x = accm_read_axis(X_AXIS);
-  y = accm_read_axis(Y_AXIS);
-  z = accm_read_axis(Z_AXIS);
-  printf("x: %d y: %d z: %d\n", x, y, z);
+  data[0] = accm_read_axis(X_AXIS);
+  data[1] = accm_read_axis(Y_AXIS);
+  data[2] = accm_read_axis(Z_AXIS);
+  //printf("x: %d y: %d z: %d\n", x, y, z);
 }
 /*---------------------------------------------------------------------------*/
 /*--------------------------ROUTING---------------------------------------------*/
@@ -198,6 +204,35 @@ static void send_string_message(char* message, rimeaddr_t *dest)
     printf("Can't find any route to destination ! \n");
   }
 }
+
+static void send_config(uint8_t key, uint8_t value)
+{
+  printf("Sending config change of %d to %d \n", key, value);
+  packet_config.type = key;
+  packet_config.value = value;
+  packet_config.version = config_version;
+  packetbuf_copyfrom((void*)&packet_config, sizeof(packet_config));
+  broadcast_send(&broadcast);
+}
+
+static void send_Data(int16_t * data, uint8_t to_write)
+{
+  packetbuf_clear();
+  packet_data.type = 4;
+  rimeaddr_copy(&packet_data.orig, &rimeaddr_node_addr);
+  packet_data.packet_size =
+   sizeof(uint8_t) + sizeof(size_t) + sizeof(rimeaddr_t) + to_write*sizeof(int16_t);
+  // *2 cause to_write is a number of int16
+  memcpy(&packet_data.data, data, to_write*sizeof(int16_t));
+
+  if(!runicast_is_transmitting(&runicast)) 
+  {
+    packetbuf_copyfrom((void*)&packet_data, packet_data.packet_size);
+    runicast_send(&runicast, &parent, 5);
+    printf("Data sent via %d.%d!\n", parent.u8[0], parent.u8[1]);
+  }
+}
+
 /*---------------------------------------------------------------------------*/
 /*--------------------------GENERAL PURPOSE----------------------------------*/
 /*---------------------------------------------------------------------------*/
@@ -276,6 +311,10 @@ broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
   else if (type == 2)
   {
     process_DIS(from);
+  }
+  else if (type == 5 || type == 6)
+  {
+    process_config(type, ((struct config*)received)->value, ((struct config*)received)->version);
   }
 }
 
@@ -407,6 +446,54 @@ process_string_message(struct string_message * string_message)
     send_string_message(string_message->message, &string_message->dest);
   }
 }
+
+static void process_sensor_data(struct sensor_data* data)
+{
+  packetbuf_clear();
+  packetbuf_copyfrom((void*)data, data->packet_size);
+  if(!runicast_is_transmitting(&runicast)) 
+  {
+    runicast_send(&runicast, &parent, 5);
+    printf("Data sent via %d.%d!\n", parent.u8[0], parent.u8[1]);
+  }
+}
+
+static void process_config(uint8_t key, uint8_t value, uint8_t version)
+{
+  printf("Received key : %d, value : %d, version : %d\n", key, value, version);
+
+  // If config received is older than actual
+  if (version <= config_version)
+  {
+    printf("Older version \n");
+    return;
+  }
+
+  // Periodicity 
+  if(key == 5)
+  {
+    // Check if change
+    if (periodicity != value)
+    {
+      periodicity = value;
+      config_version = version;
+      send_config(key, value);
+      printf("Changed config periodicity to %d \n", value);
+    }
+  }
+  else if(key == 6)
+  {
+    if (sensor_types != value)
+    {
+      printf("I received sensor types : %d \n" , value);
+      sensor_types = value;
+      config_version = version;
+      send_config(key, value);
+      printf("Changed config sensor types to %d \n", value);
+    }
+  }
+}
+
 /*---------------------------------------------------------------------------*/
 /*--------------------------UNICAST------------------------------------------*/
 /*---------------------------------------------------------------------------*/
@@ -456,6 +543,10 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
   {
     process_string_message((struct string_message*)received);
   }
+  else if (type == 4)
+  {
+    process_sensor_data((struct sensor_data*)received);
+  }
   /*
   printf("runicast message received from %d.%d : \"%s\" , seqno %d\n",
 	 from->u8[0], from->u8[1], (char *)packetbuf_dataptr(), seqno);
@@ -475,7 +566,7 @@ timedout_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retrans
 	 to->u8[0], to->u8[1], retransmissions);
 
   // timed out is used to check if parent is still at reach 
-  if(rimeaddr_cmp(to, &parent))
+  if(rimeaddr_cmp(to, &parent) && retransmissions == MAX_RETRANSMISSIONS)
   {
     forget_parent(); 
   }
@@ -523,6 +614,10 @@ PROCESS_THREAD(simple_node_process, ev, data)
     static struct etimer DAO_et;
     static struct etimer status_et;
 
+    static int16_t battery;
+    static int16_t temperature;
+    static int16_t accelerometer[3];
+
     etimer_set(&DIS_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3));
     etimer_set(&DAO_et, CLOCK_SECOND * 5 + random_rand() % (CLOCK_SECOND * 5));
     etimer_set(&status_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3) );
@@ -554,8 +649,35 @@ PROCESS_THREAD(simple_node_process, ev, data)
       if(!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable) 
       {
         send_DIO();
+        //send_config(5, periodicity);
+        //send_config(6, sensor_types);
+
+        static int16_t data[5];
+        static uint8_t sensor_number;
+        sensor_number = 0;
+        // Get sensors value
+        if (sensor_types & 0b001)
+        {
+          data[sensor_number] = get_temperature();
+          ++sensor_number;
+        }
+        if (sensor_types & 0b010)
+        {
+          data[sensor_number] = get_battery();
+          ++sensor_number;
+        }
+        if (sensor_types & 0b100)
+        {
+          get_accelerometer(&accelerometer);
+          memcpy(&data[sensor_number], &accelerometer, 3*sizeof(int16_t));
+          printf("Accelerometer : %d:%d:%d \n", data[sensor_number], data[sensor_number+1], data[sensor_number+2]);
+          sensor_number += 3;
+        }
+        if(sensor_types != 0)
+        {
+          send_Data(&data, sensor_number);
+        }
       }
-      //get_temperature();
 
       printf("I'm %d.%d and my parent is %d.%d\n",
       rimeaddr_node_addr.u8[0],
