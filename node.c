@@ -25,6 +25,7 @@
 #include "leds.h"
 
 #define MAX_RETRANSMISSIONS 10
+#define MAX_RETRANSMISSIONS_DATA 2
 #define SIGNAL
 
 /*---------------------------------------------------------------------------*/
@@ -47,7 +48,7 @@ static uint8_t config_version = 0;
 
 static int16_t last_temperature;
 static int16_t last_battery;
-static int16_t[3] last_accelerometer;
+static int16_t last_accelerometer[3];
 
 LIST(custom_route_table);
 MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
@@ -228,7 +229,7 @@ static void send_Data(int16_t * data, uint8_t to_write)
   if(!runicast_is_transmitting(&runicast)) 
   {
     packetbuf_copyfrom((void*)&packet_data, packet_data.packet_size);
-    runicast_send(&runicast, &parent, 5);
+    runicast_send(&runicast, &parent, MAX_RETRANSMISSIONS_DATA);
     printf("Data sent via %d.%d!\n", parent.u8[0], parent.u8[1]);
   }
 }
@@ -453,7 +454,7 @@ static void process_sensor_data(struct sensor_data* data)
   packetbuf_copyfrom((void*)data, data->packet_size);
   if(!runicast_is_transmitting(&runicast)) 
   {
-    runicast_send(&runicast, &parent, 5);
+    runicast_send(&runicast, &parent, MAX_RETRANSMISSIONS_DATA);
     printf("Data sent via %d.%d!\n", parent.u8[0], parent.u8[1]);
   }
 }
@@ -649,31 +650,48 @@ PROCESS_THREAD(simple_node_process, ev, data)
       if(!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable) 
       {
         send_DIO();
-        //send_config(5, periodicity);
-        //send_config(6, sensor_types);
+        send_config(5, periodicity);
+        send_config(6, sensor_types);
 
         static int16_t data[5];
         static uint8_t sensor_number;
+        static uint8_t has_to_send;
+        has_to_send = 0;
         sensor_number = 0;
         // Get sensors value
         if (sensor_types & 0b001)
         {
           data[sensor_number] = get_temperature();
+          if(data[sensor_number] != last_temperature)
+          {
+            has_to_send = 1;
+            last_temperature = data[sensor_number];
+          }
           ++sensor_number;
         }
         if (sensor_types & 0b010)
         {
           data[sensor_number] = get_battery();
+          if(data[sensor_number] != last_battery)
+          {
+            has_to_send = 1;
+            last_battery = data[sensor_number];
+          }
           ++sensor_number;
         }
         if (sensor_types & 0b100)
         {
-          get_accelerometer(&accelerometer);
-          memcpy(&data[sensor_number], &accelerometer, 3*sizeof(int16_t));
-          printf("Accelerometer : %d:%d:%d \n", data[sensor_number], data[sensor_number+1], data[sensor_number+2]);
+          get_accelerometer(&data[sensor_number]);
+          // Compare two arrays 
+          if(memcmp(&data[sensor_number], last_accelerometer, 3 * sizeof(int16_t)) != 0)
+          {
+            has_to_send = 1;
+            memcpy(last_accelerometer, &data[sensor_number], 3 * sizeof(int16_t));
+          }
           sensor_number += 3;
         }
-        if(sensor_types != 0)
+        // Only send if periodicity or change detected
+        if(sensor_types != 0 && (has_to_send || periodicity))
         {
           send_Data(&data, sensor_number);
         }

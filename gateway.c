@@ -195,7 +195,6 @@ static void process_sensor_data(struct sensor_data* data)
     written += 9;
   }
   strcpy(&format[written], "\n\0");
-  printf("%s", format);
   printf(format,
    data->orig.u8[0], data->orig.u8[1], data->data[0],
     data->data[1], data->data[2], data->data[3], data->data[4]);
