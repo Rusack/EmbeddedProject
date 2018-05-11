@@ -206,10 +206,10 @@ static void send_string_message(char* message, rimeaddr_t *dest)
   }
 }
 
-static void send_config(uint8_t key, uint8_t value)
+static void send_config(uint8_t value)
 {
-  printf("Sending config change of %d to %d \n", key, value);
-  packet_config.type = key;
+  printf("Sending config change to %d \n", value);
+  packet_config.type = 5;
   packet_config.value = value;
   packet_config.version = config_version;
   packetbuf_copyfrom((void*)&packet_config, sizeof(packet_config));
@@ -474,23 +474,13 @@ static void process_config(uint8_t key, uint8_t value, uint8_t version)
   if(key == 5)
   {
     // Check if change
-    if (periodicity != value)
+    if ((sensor_types | periodicity) != value)
     {
-      periodicity = value;
+      periodicity = value & 0b1000;
+      sensor_types = value & 0b0111;
       config_version = version;
-      send_config(key, value);
-      printf("Changed config periodicity to %d \n", value);
-    }
-  }
-  else if(key == 6)
-  {
-    if (sensor_types != value)
-    {
-      printf("I received sensor types : %d \n" , value);
-      sensor_types = value;
-      config_version = version;
-      send_config(key, value);
-      printf("Changed config sensor types to %d \n", value);
+      send_config(value);
+      printf("Changed config to %d \n", value);
     }
   }
 }
@@ -650,8 +640,7 @@ PROCESS_THREAD(simple_node_process, ev, data)
       if(!rimeaddr_cmp(&parent, &rimeaddr_null) && root_reachable) 
       {
         send_DIO();
-        send_config(5, periodicity);
-        send_config(6, sensor_types);
+        send_config(sensor_types | periodicity);
 
         static int16_t data[5];
         static uint8_t sensor_number;

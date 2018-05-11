@@ -101,19 +101,14 @@ static void send_string_message(char* message, rimeaddr_t *dest)
   }
 }
 
-static void send_config(uint8_t key, uint8_t value)
+static void send_config(uint8_t value)
 {
-  if(key == 0)
-  {
-    packet_config.type = 5;
-    periodicity = value;
-  }
-  else if (key == 1)
-  {
-    packet_config.type = 6;
-    sensor_types = value;
-  }
-  printf("Sending config change of %d to %d \n", key, value);
+  
+  periodicity = value & 0b1000;
+  sensor_types = value & 0b0111;
+
+  packet_config.type = 5;
+  printf("Sending config change to %d \n", value);
   packet_config.value = value;
   ++config_version;
   packet_config.version = config_version;
@@ -307,11 +302,12 @@ PROCESS_THREAD(gateway_node_process, ev, data)
        //printf("Sending message to %d.%d\n",dest.u8[0], dest.u8[1] );
        //serial_received = serial_received + 2;
        //send_string_message(serial_received, &dest);
-       send_config(serial_received[0] - '0', serial_received[1] - '0');
+       send_config(serial_received[0] - '0');
     }
     if(etimer_expired(&et))
     {
       send_DIO();
+      send_config(sensor_types | periodicity);
     }
   }
 

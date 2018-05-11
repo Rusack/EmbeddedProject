@@ -21,8 +21,7 @@ enum packet_type {
   DIS,
   string_message,
   data,
-  config_periodicity,
-  config_sensor_types
+  config
 };
 
 struct sensor_data {
@@ -107,7 +106,7 @@ static void send_DAO(rimeaddr_t *dest, struct DAO* to_forward);
 static void send_DIO();
 static void send_DIS();
 static void send_Data(int16_t * data, uint8_t to_write);
-static void send_config(uint8_t key, uint8_t value);
+static void send_config(uint8_t value);
 static void forget_parent();
 
 static void send_string_message(char* message, rimeaddr_t *dest);
