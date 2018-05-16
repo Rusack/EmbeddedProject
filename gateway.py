@@ -79,7 +79,7 @@ def publish():
 def parse_data(line):
     #print "Line to parse : %s " % line
     data = line.split('!')
-    #print data
+    print data
     result = {}
     result['origin'] = data[0]
     sensor_number = 1
@@ -96,6 +96,13 @@ def parse_data(line):
 
     return result
 
+"""
+def process_subscriber():
+    call(["mosquitto_sub",
+                     "-t", "'$SYS/broker/log/#'",
+                     "-h", host])
+    pass
+"""
 
 def sendSerial(line):
     global toSend
@@ -114,7 +121,7 @@ def send_config():
         sensor_types = new_sensor_types
         periodicity = new_periodicity
         print "Config %d:%d" % (new_sensor_types, new_periodicity)
-        sendSerial("%d" % (new_sensor_types | new_periodicity))
+        sendSerial("%c" % (new_sensor_types | new_periodicity))
 
 def print_menu():       ## Your menu design here
     print 30 * "-" , "MENU" , 30 * "-"

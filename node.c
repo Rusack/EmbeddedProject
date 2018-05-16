@@ -1,19 +1,13 @@
 #include <stdio.h>
 #include <string.h>
-
 #include "contiki.h"
 #include "net/rime.h"
-
 #include "lib/list.h"
 #include "lib/memb.h"
-
-#include "dev/button-sensor.h"
-#include "dev/leds.h"
-
+#include "random.h"
 // RSS
 #include "dev/cc2420.h"
 #include "dev/cc2420_const.h"
-
 #include "common.h"
 
 // Sensors
@@ -22,10 +16,10 @@
 #include "dev/battery-sensor.h"
 #include "dev/adxl345.h"
 
-#include "leds.h"
-
 #define MAX_RETRANSMISSIONS 10
 #define MAX_RETRANSMISSIONS_DATA 2
+
+// Defined if using signal as parent criteria
 #define SIGNAL
 
 /*---------------------------------------------------------------------------*/
@@ -55,63 +49,30 @@ MEMB(custom_route_mem, struct custom_route_entry, MAX_ROUTE_ENTRIES);
 /*---------------------------------------------------------------------------*/
 /*--------------------------SENSOR DATA--------------------------------------*/
 /*---------------------------------------------------------------------------*/
-// math floor function
-float
-floor(float x)
-{
-  if(x >= 0.0f) {
-    return (float) ((int) x);
-  } else {
-    return (float) ((int) x - 1);
-  }
-}
+
 static int16_t get_temperature()
 {
-  static int16_t  tempint;
-  static uint16_t tempfrac;
-  static int16_t  raw;
-  static uint16_t absraw;
-  static int16_t  sign;
-  static char     minus = ' ';
-
-  sign = 1;
-  raw = tmp102_read_temp_raw();  // Reading from the sensor
-  absraw = raw;
-  if (raw < 0) 
-  { // Perform 2C's if sensor returned negative data
-    absraw = (raw ^ 0xFFFF) + 1;
-    sign = -1;
-  }
-  tempint  = (absraw >> 8) * sign;
-  tempfrac = ((absraw>>4) % 16) * 625; // Info in 1/10000 of degree
-  minus = ((tempint == 0) & (sign == -1)) ? '-'  : ' ' ;
-  //printf ("Temp = %c%d.%04d\n", minus, tempint, tempfrac);
-  return raw;
+  return tmp102_read_temp_raw();
 }
+
 static uint16_t get_battery()
 {
-  static uint16_t bateria;
-  static float mv;
-  bateria = battery_sensor.value(0);
-  mv = (bateria * 2.500 * 2) / 4096;
-  //printf("Battery: %i (%ld.%03d mV)\n", bateria, (long) mv,
-  //(unsigned) ((mv - floor(mv)) * 1000));
-  return bateria;
+  return battery_sensor.value(0);
 }
+
 static void get_accelerometer(int16_t* data)
 {
   data[0] = accm_read_axis(X_AXIS);
   data[1] = accm_read_axis(Y_AXIS);
   data[2] = accm_read_axis(Z_AXIS);
-  //printf("x: %d y: %d z: %d\n", x, y, z);
 }
 /*---------------------------------------------------------------------------*/
-/*--------------------------ROUTING---------------------------------------------*/
+/*--------------------------PACKET SENDING-----------------------------------*/
 /*---------------------------------------------------------------------------*/
 // Give information about the node help other nodes choose a parent 
 static void send_DIO()
 {
-  packet_DIO.type = 0;
+  packet_DIO.type = DIO;
   packet_DIO.rank = rank;
   packet_DIO.parent = parent;
   packetbuf_copyfrom((void*)&packet_DIO, sizeof(packet_DIO));
@@ -121,7 +82,7 @@ static void send_DIO()
 
 static void send_DIO_unicast(rimeaddr_t *to)
 {
-  packet_DIO.type = 0;
+  packet_DIO.type = DIO;
   packet_DIO.rank = rank;
   packet_DIO.parent = parent;
   packetbuf_copyfrom((void*)&packet_DIO, sizeof(packet_DIO));
@@ -134,7 +95,7 @@ static void send_DIO_unicast(rimeaddr_t *to)
 // Sent upward to the gateway
 static void send_DAO(rimeaddr_t *dest, struct DAO* to_forward)
 {
-  packet_DAO.type = 1;
+  packet_DAO.type = DAO;
   rimeaddr_copy(&packet_DAO.dest, dest);
 
   if (to_forward == NULL)
@@ -161,55 +122,16 @@ static void send_DAO(rimeaddr_t *dest, struct DAO* to_forward)
 // Ask for a DIO
 static void send_DIS()
 {
-  packet_DIS.type = 2;
+  packet_DIS.type = DIS;
   packetbuf_copyfrom((void*)&packet_DIS, sizeof(packet_DIS));
   broadcast_send(&broadcast);
   printf("No parent, DIS sent\n");
-}
-// Send a string message to a node (testing purpose)
-static void send_string_message(char* message, rimeaddr_t *dest)
-{
-
-  // search through routing table the next node to which send the message
-  static struct custom_route_entry *e;
-  static rimeaddr_t nextNode;
-
-  for(e = list_head(custom_route_table); e != NULL; e = e->next) 
-  {
-    // if entry found
-    if(rimeaddr_cmp(&e->dest, dest)) 
-    {
-      // get the next node
-      rimeaddr_copy(&nextNode, &e->nextNode);
-      break;
-    }
-  }
-  // If entry has been found
-  if (e != NULL)
-  {
-    packet_string.type = 3;
-    packet_string.dest = *dest;
-
-    strncpy(packet_string.message, message, 32);
-    packet_string.message[31] = '\0';
-
-    if(!runicast_is_transmitting(&runicast)) 
-    {
-      packetbuf_copyfrom((void*)&packet_string, sizeof(packet_string));
-      runicast_send(&runicast, &nextNode, MAX_RETRANSMISSIONS);
-      printf("Message sent via %d.%d!\n", nextNode.u8[0], nextNode.u8[1]);
-    }
-  }
-  else
-  {
-    printf("Can't find any route to destination ! \n");
-  }
 }
 
 static void send_config(uint8_t value)
 {
   printf("Sending config change to %d \n", value);
-  packet_config.type = 5;
+  packet_config.type = CONFIG;
   packet_config.value = value;
   packet_config.version = config_version;
   packetbuf_copyfrom((void*)&packet_config, sizeof(packet_config));
@@ -219,7 +141,7 @@ static void send_config(uint8_t value)
 static void send_Data(int16_t * data, uint8_t to_write)
 {
   packetbuf_clear();
-  packet_data.type = 4;
+  packet_data.type = DATA;
   rimeaddr_copy(&packet_data.orig, &rimeaddr_node_addr);
   packet_data.packet_size =
    sizeof(uint8_t) + sizeof(size_t) + sizeof(rimeaddr_t) + to_write*sizeof(int16_t);
@@ -278,6 +200,14 @@ static void check_parent_change(const rimeaddr_t * addr, signed char recv_RSS, u
     rank = recv_Hops + 1;
     send_DAO(&rimeaddr_node_addr, NULL);
 }
+
+static void forget_parent()
+{
+  root_reachable = 0;
+  rimeaddr_copy(&parent, &rimeaddr_null);
+  rank = 255;
+}
+
 static signed char get_last_rss()
 {
   // RSS variables
@@ -305,15 +235,15 @@ broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
   received = packetbuf_dataptr();
   type = ((char*)received)[0];
   //printf("Type received : %d\n", type);
-  if(type == 0)
+  if(type == DIO)
   {
     process_DIO((struct DIO*)received, from);
   }
-  else if (type == 2)
+  else if (type == DIS)
   {
     process_DIS(from);
   }
-  else if (type == 5 || type == 6)
+  else if (type == CONFIG)
   {
     process_config(type, ((struct config*)received)->value, ((struct config*)received)->version);
   }
@@ -321,6 +251,10 @@ broadcast_recv(struct broadcast_conn *c, const rimeaddr_t *from)
 
 // Variables
 static const struct broadcast_callbacks broadcast_call = {broadcast_recv};
+
+/*---------------------------------------------------------------------------*/
+/*--------------------------PACKET PROCESSING--------------------------------*/
+/*---------------------------------------------------------------------------*/
 
 static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
 {
@@ -391,12 +325,7 @@ static void process_DAO(struct DAO * dao, rimeaddr_t * nextNode)
     send_DAO(&dest, dao);
   }
 }
-static void forget_parent()
-{
-  root_reachable = 0;
-  rimeaddr_copy(&parent, &rimeaddr_null);
-  rank = 255;
-}
+
 
 // Check for a new parent using the received DIO
 static void process_DIO(struct DIO * dio, const rimeaddr_t *from)
@@ -434,19 +363,6 @@ static void process_DIS(const rimeaddr_t * from)
     send_DIO_unicast(from);
   }
 }
-// Process string message, get content or forward it
-process_string_message(struct string_message * string_message)
-{
-  if(rimeaddr_cmp(&rimeaddr_node_addr, &string_message->dest))
-  {
-    printf("It's for me ! Message is %s\n", string_message->message);
-    leds_toggle(LEDS_ALL);
-  }
-  else
-  {
-    send_string_message(string_message->message, &string_message->dest);
-  }
-}
 
 static void process_sensor_data(struct sensor_data* data)
 {
@@ -471,7 +387,7 @@ static void process_config(uint8_t key, uint8_t value, uint8_t version)
   }
 
   // Periodicity 
-  if(key == 5)
+  if(key == CONFIG)
   {
     // Check if change
     if ((sensor_types | periodicity) != value)
@@ -526,30 +442,23 @@ recv_runicast(struct runicast_conn *c, const rimeaddr_t *from, uint8_t seqno)
   void* received = packetbuf_dataptr();
   type = ((char*)received)[0];
   //printf("Type received : %d\n", type);
-  if(type == 1)
+  if(type == DAO)
   {
     process_DAO((struct DAO*)received, from);
   }
-  else if (type == 3)
-  {
-    process_string_message((struct string_message*)received);
-  }
-  else if (type == 4)
+  else if (type == DATA)
   {
     process_sensor_data((struct sensor_data*)received);
   }
-  /*
-  printf("runicast message received from %d.%d : \"%s\" , seqno %d\n",
-	 from->u8[0], from->u8[1], (char *)packetbuf_dataptr(), seqno);
-  */
-
 }
+
 static void
 sent_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retransmissions)
 {
   printf("runicast message sent to %d.%d, retransmissions %d\n",
 	 to->u8[0], to->u8[1], retransmissions);
 }
+
 static void
 timedout_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retransmissions)
 {
@@ -562,6 +471,7 @@ timedout_runicast(struct runicast_conn *c, const rimeaddr_t *to, uint8_t retrans
     forget_parent(); 
   }
 }
+
 static const struct runicast_callbacks runicast_callbacks = {recv_runicast,
 							     sent_runicast,
 							     timedout_runicast};
@@ -589,9 +499,6 @@ PROCESS_THREAD(simple_node_process, ev, data)
   list_init(custom_route_table);
   memb_init(&custom_route_mem);
 
-  // Activate leds for real test
-  leds_off(LEDS_ALL);
-
   // initialize temperature sensor 
   tmp102_init();
   // battery sensor 
@@ -604,10 +511,6 @@ PROCESS_THREAD(simple_node_process, ev, data)
     static struct etimer DIS_et;
     static struct etimer DAO_et;
     static struct etimer status_et;
-
-    static int16_t battery;
-    static int16_t temperature;
-    static int16_t accelerometer[3];
 
     etimer_set(&DIS_et, CLOCK_SECOND * 3 + random_rand() % (CLOCK_SECOND * 3));
     etimer_set(&DAO_et, CLOCK_SECOND * 5 + random_rand() % (CLOCK_SECOND * 5));
@@ -696,7 +599,6 @@ PROCESS_THREAD(simple_node_process, ev, data)
   }
 
   exit :
-    leds_off(LEDS_ALL);
     runicast_close(&runicast);
     broadcast_close(&broadcast);
     PROCESS_END();
